@@ -1,0 +1,7 @@
+# Godot auto-generated files
+.godot/
+
+# Export builds
+*.exe
+*.x86_64
+*.apk
