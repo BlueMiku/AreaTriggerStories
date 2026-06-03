@@ -201,7 +201,21 @@ func _do_convert():
 			continue
 		rows.append(_parse_row(cols))
 
-	var result = { area_name: rows }
+	# Merge into existing JSON if the file already exists
+	var result: Dictionary = {}
+	var merge_note := ""
+	if FileAccess.file_exists(out_path):
+		var existing_file = FileAccess.open(out_path, FileAccess.READ)
+		if existing_file:
+			var json := JSON.new()
+			if json.parse(existing_file.get_as_text()) == OK:
+				result = json.get_data()
+				merge_note = " (merged)" if result.has(area_name) else " (added)"
+			else:
+				merge_note = " (existing file unreadable — overwritten)"
+			existing_file.close()
+
+	result[area_name] = rows
 	var json_str = JSON.stringify(result, "\t")
 
 	var out_file = FileAccess.open(out_path, FileAccess.WRITE)
@@ -211,8 +225,8 @@ func _do_convert():
 	out_file.close()
 
 	preview_edit.text = json_str
-	var skip_note = (" (%d non-data rows skipped)" % skipped) if skipped > 0 else ""
-	_set_status("Done! %d rows converted%s  →  %s" % [rows.size(), skip_note, out_path], Color.GREEN)
+	var skip_note = (" · %d non-data rows skipped" % skipped) if skipped > 0 else ""
+	_set_status("Done! %d rows%s%s  →  %s" % [rows.size(), merge_note, skip_note, out_path], Color.GREEN)
 
 
 # ──────────────────────────────────────────────
