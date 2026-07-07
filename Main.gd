@@ -5,25 +5,11 @@ var csv_path_edit: LineEdit
 var area_name_edit: LineEdit
 var output_path_edit: LineEdit
 var status_label: Label
+var warnings_label: Label
 var preview_edit: TextEdit
 
-# Column index groups: [scene_col, lv_col, content_col]
-const NPC_SLOT_COLS = {
-	"1": [9,  10, 11],
-	"2": [12, 13, 14],
-	"3": [15, 16, 17],
-	"4": [18, 19, 20],
-	"5": [21, 22, 23],
-	"6": [24, 25, 26],
-}
-
-const OBJECT_SLOT_COLS = {
-	"A": [27, 28, 29],
-	"B": [30, 31, 32],
-	"C": [33, 34, 35],
-	"D": [36, 37, 38],
-	"E": [39, 40, 41],
-}
+# Accumulated per-conversion warnings (reset each run)
+var _warnings: Array[String] = []
 
 
 func _ready():
@@ -87,6 +73,13 @@ func _ready():
 	status_label.text = "Ready."
 	status_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	btn_row.add_child(status_label)
+
+	# Warnings box (hidden until there are warnings)
+	warnings_label = Label.new()
+	warnings_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	warnings_label.add_theme_color_override("font_color", Color(1.0, 0.6, 0.1))
+	warnings_label.hide()
+	vbox.add_child(warnings_label)
 
 	# Preview
 	vbox.add_child(HSeparator.new())
@@ -190,6 +183,14 @@ func _do_convert():
 	if lines.size() < 2:
 		return _set_status("ERROR: CSV appears to have no data rows.", Color.RED)
 
+	# Detect format by reading the header row
+	var header_cols = _parse_csv_line(lines[0])
+	var has_item_story = header_cols.has("item_story")
+	var format_label = "v2 (item_story)" if has_item_story else "v1 (legacy)"
+
+	# Reset warnings for this run
+	_warnings.clear()
+
 	# Skip header (index 0), parse remaining rows
 	var rows = []
 	var skipped = 0
@@ -199,7 +200,14 @@ func _do_convert():
 		if cols.is_empty() or not cols[0].strip_edges().is_valid_int():
 			skipped += 1
 			continue
-		rows.append(_parse_row(cols))
+		rows.append(_parse_row(cols, has_item_story, i + 1))
+
+	# Show warnings if any
+	if _warnings.is_empty():
+		warnings_label.hide()
+	else:
+		warnings_label.text = "⚠ WARNINGS:\n" + "\n".join(_warnings)
+		warnings_label.show()
 
 	# Merge into existing JSON if the file already exists
 	var result: Dictionary = {}
@@ -225,8 +233,12 @@ func _do_convert():
 	out_file.close()
 
 	preview_edit.text = json_str
-	var skip_note = (" · %d non-data rows skipped" % skipped) if skipped > 0 else ""
-	_set_status("Done! %d rows%s%s  →  %s" % [rows.size(), merge_note, skip_note, out_path], Color.GREEN)
+	var skip_note    = (" · %d skipped" % skipped) if skipped > 0 else ""
+	var warning_note = (" · %d warning(s)" % _warnings.size()) if not _warnings.is_empty() else ""
+	_set_status(
+		"Done! [%s] %d rows%s%s%s  →  %s" % [format_label, rows.size(), merge_note, skip_note, warning_note, out_path],
+		Color.YELLOW if not _warnings.is_empty() else Color.GREEN
+	)
 
 
 # ──────────────────────────────────────────────
@@ -261,24 +273,37 @@ func _parse_csv_line(line: String) -> Array:
 #  Row → Dictionary
 # ──────────────────────────────────────────────
 
-func _parse_row(cols: Array) -> Dictionary:
-	# Ensure we always have enough columns to index safely
-	while cols.size() < 42:
+func _parse_row(cols: Array, has_item_story: bool, csv_row_num: int) -> Dictionary:
+	# o = column offset for everything after item_requirement (col 4)
+	var o = 1 if has_item_story else 0
+
+	# Pad to avoid out-of-bounds
+	while cols.size() < 43 + o:
 		cols.append("")
 
 	var row = {}
-	row["day"]               = int(cols[0].strip_edges())
-	row["priority"]          = int(cols[1].strip_edges()) if cols[1].strip_edges().is_valid_int() else 0
-	row["expired_on"]        = _str_or_null(cols[2])
-	row["start_at"]          = _str_or_null(cols[3])
-	row["item_requirement"]  = _parse_item_req(cols[4])
-	row["no_travel"]         = cols[5].strip_edges().to_lower() == "true"
-	row["no_travel_message"] = _str_or_null(cols[6])
+	row["day"]              = int(cols[0].strip_edges())
+	row["priority"]         = int(cols[1].strip_edges()) if cols[1].strip_edges().is_valid_int() else 0
+	row["expired_on"]       = _str_or_null(cols[2])
+	row["start_at"]         = _str_or_null(cols[3])
+	row["item_requirement"] = _parse_item_req(cols[4])
 
-	# auto_content  (col 7 = chapter name, col 8 = level requirement)
-	var auto_ch = _str_or_null(cols[7])
+	# item_story only exists in v2; always written to JSON (false in v1)
+	var item_story = cols[5].strip_edges().to_lower() == "true" if has_item_story else false
+	row["item_story"] = item_story
+
+	var no_travel = cols[5 + o].strip_edges().to_lower() == "true"
+	row["no_travel"]         = no_travel
+	row["no_travel_message"] = _str_or_null(cols[6 + o])
+
+	# Validate: item_story and no_travel cannot both be true
+	if item_story and no_travel:
+		_warnings.append("CSV row %d: both item_story and no_travel are TRUE — only one may be true at a time." % csv_row_num)
+
+	# auto_content
+	var auto_ch = _str_or_null(cols[7 + o])
 	if auto_ch != null:
-		var lv_s = cols[8].strip_edges()
+		var lv_s = cols[8 + o].strip_edges()
 		row["auto_content"] = {
 			"chapter":        auto_ch,
 			"level_required": int(lv_s) if lv_s.is_valid_int() else -1
@@ -286,32 +311,32 @@ func _parse_row(cols: Array) -> Dictionary:
 	else:
 		row["auto_content"] = null
 
-	# NPC slots  (scene / level_required / content)
+	# NPC slots — base index 9, 3 cols each, all shifted by o
 	var npc_slots = {}
-	for slot_key in NPC_SLOT_COLS:
-		var idx     = NPC_SLOT_COLS[slot_key]
-		var scene   = _str_or_null(cols[idx[0]])
-		var lv_s    = cols[idx[1]].strip_edges()
-		var content = _str_or_null(cols[idx[2]])
+	for n in range(1, 7):
+		var base = 9 + o + (n - 1) * 3
+		var scene   = _str_or_null(cols[base])
+		var lv_s    = cols[base + 1].strip_edges()
+		var content = _str_or_null(cols[base + 2])
 		if scene != null or content != null:
-			npc_slots[slot_key] = {
+			npc_slots[str(n)] = {
 				"scene":          scene,
 				"level_required": int(lv_s) if lv_s.is_valid_int() else -1,
 				"content":        content
 			}
 	row["npc_slots"] = npc_slots
 
-	# Object slots  (scene / level_required / content)
-	# scene column may be empty in the CSV (object defined by slot position in the background),
-	# but we always write the key so it's never silently missing in the JSON.
+	# Object slots — base index 27, 3 cols each, all shifted by o
+	# scene column may be empty (object defined by slot position); never omit the key.
 	var object_slots = {}
-	for slot_key in OBJECT_SLOT_COLS:
-		var idx     = OBJECT_SLOT_COLS[slot_key]
-		var scene   = _str_or_null(cols[idx[0]])
-		var lv_s    = cols[idx[1]].strip_edges()
-		var content = _str_or_null(cols[idx[2]])
+	var obj_keys = ["A", "B", "C", "D", "E"]
+	for n in range(obj_keys.size()):
+		var base    = 27 + o + n * 3
+		var scene   = _str_or_null(cols[base])
+		var lv_s    = cols[base + 1].strip_edges()
+		var content = _str_or_null(cols[base + 2])
 		if lv_s != "" or content != null:
-			object_slots[slot_key] = {
+			object_slots[obj_keys[n]] = {
 				"scene":          scene,
 				"level_required": int(lv_s) if lv_s.is_valid_int() else -1,
 				"content":        content
@@ -336,7 +361,7 @@ func _parse_item_req(s: String):
 		return null
 	var parts = t.split(",")
 	if parts.size() != 3:
-		push_warning("item_requirement has unexpected format: " + t)
+		_warnings.append("item_requirement has unexpected format (expected type,id,qty): \"%s\"" % t)
 		return null
 	return {
 		"type": parts[0].strip_edges(),
